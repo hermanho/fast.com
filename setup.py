@@ -32,12 +32,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-setup(name='fastdotcom',
-      version='0.0.3',
+setup(name='fastdotcom_v2',
+      version='0.0.1',
       description='Python API for testing internet speed on Fast.com',
-      url='https://github.com/nkgilley/fast.com',
-      author='Nolan Gilley',
+      url='https://github.com/hermanho/fast.com',
+      author='Nolan Gilley, Herman Ho',
       license='MIT',
-      install_requires=['requests>=2.0'],
-      packages=['fastdotcom'],
+      packages=['fastdotcom_v2'],
       zip_safe=True)
