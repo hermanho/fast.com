@@ -8,26 +8,53 @@ import urllib.request, urllib.parse, urllib.error
 import sys
 import time
 from threading import Thread
+import random
+import string
+import socket
+
+from BufferReader import BufferReader
 
 
-def gethtmlresult(url,result,index):
+def gethtmlresult_dl(url,result,index,stop=lambda : False):
   '''
   get the stuff from url in chuncks of size CHUNK, and keep writing the number of bytes retrieved into result[index]
   '''
-  try:
-    req = urllib.request.urlopen(url)
-  except urllib.error.URLError:
-    result[index] = 0
-    return
+  while not stop():
+    try:
+      req = urllib.request.urlopen(url)
+    except urllib.error.URLError:
+      return
 
-  CHUNK = 100 * 1024
-  i=1
-  while True:
+    CHUNK = 100 * 1024
+    while True:
       chunk = req.read(CHUNK)
+      if stop(): return
       if not chunk: break
-      result[index] = i*CHUNK
-      i=i+1
+      result[index] = result[index] + CHUNK
 
+
+def gethtmlresult_ul(url,result,index,stop=lambda : False):
+  size = 5 * 1024 * 1024 # 5MB
+  payload = ''.join(random.choice(string.digits) for i in range(size)).encode('ascii')
+
+  def progress(size=None, progress=None, chunk_len=None):
+      result[index] = result[index] + chunk_len
+
+  while not stop():
+    buffer_payload = BufferReader(payload, progress)
+    r = urllib.request.Request(url, buffer_payload)
+    r.add_header('Content-Length', '%d' % len(payload))
+    r.add_header('Content-Type', 'application/octet-stream')
+
+    start_time = time.time()
+    try:
+      req = urllib.request.urlopen(r)
+    except urllib.error.URLError:
+      return
+
+    chunk = req.read()
+    # result[index] = result[index] + size
+    end_time = time.time()
 
 def application_bytes_to_networkbits(bytes):
   # convert bytes (at application layer) to bits (at network layer)
@@ -40,7 +67,6 @@ def findipv4(fqdn):
   '''
     find IPv4 address of fqdn
   '''
-  import socket
   ipv4 = socket.getaddrinfo(fqdn, 80, socket.AF_INET)[0][4][0]
   return ipv4
 
@@ -49,7 +75,6 @@ def findipv6(fqdn):
   '''
     find IPv6 address of fqdn
   '''
-  import socket
   ipv6 = socket.getaddrinfo(fqdn, 80, socket.AF_INET6)[0][4][0]
   return ipv6
 
@@ -63,11 +88,14 @@ def fast_com(verbose=False, maxtime=15, forceipv4=False, forceipv6=False):
   '''
   # go to fast.com to get the javascript file
   url = 'https://fast.com/'
+  jsname = ''
+  token = ''
+  zero_ret = dict(dl_Mbps=0,ul_Mbps=0)
   try:
     urlresult = urllib.request.urlopen(url)
   except:
     # no connection at all?
-    return 0
+    return zero_ret
   response = urlresult.read().decode().strip()
   for line in response.split('\n'):
     # We're looking for a line like
@@ -83,7 +111,7 @@ def fast_com(verbose=False, maxtime=15, forceipv4=False, forceipv6=False):
     urlresult = urllib.request.urlopen(url)
   except:
     # connection is broken
-    return 0
+    return zero_ret
   allJSstuff = urlresult.read().decode().strip() # this is a obfuscated Javascript file
   for line in allJSstuff.split(','):
     if line.find('token:') >= 0:
@@ -111,19 +139,18 @@ def fast_com(verbose=False, maxtime=15, forceipv4=False, forceipv6=False):
   except:
     # not good
     if verbose: print("No connection possible") # probably IPv6, or just no network
-    return 0  # no connection, thus no speed
+    return zero_ret  # no connection, thus no speed
 
   jsonresult = urlresult.read().decode().strip()
   parsedjson = json.loads(jsonresult)
+  netflix_targets = parsedjson['targets']
 
   # Prepare for getting those URLs in a threaded way:
-  amount = len(parsedjson)
+  amount = len(netflix_targets)
   if verbose: print("Number of URLs:", amount)
-  threads = [None] * amount
-  results = [0] * amount
-  urls = [None] * amount
+  urls = [''] * amount
   i = 0
-  for jsonelement in parsedjson:
+  for jsonelement in netflix_targets:
     urls[i] = jsonelement['url']  # fill out speed test url from the json format
     if verbose: print(jsonelement['url'])
     i = i+1
@@ -137,41 +164,83 @@ def fast_com(verbose=False, maxtime=15, forceipv4=False, forceipv6=False):
     except:
       pass
 
-  # Now start the threads
+  dl_highestspeedkBps = monitor_download(verbose, urls, maxtime)
+
+  dl_mbps = (application_bytes_to_networkbits(dl_highestspeedkBps)/1024)
+  dl_mbps = float("%.1f" % dl_mbps)
+  if verbose: print("Highest Download Speed (kB/s):", dl_highestspeedkBps,  "aka Mbps ", dl_mbps)
+
+  ul_highestspeedkBps = monitor_upload(verbose, urls, maxtime)
+
+  ul_mbps = (application_bytes_to_networkbits(ul_highestspeedkBps)/1024)
+  ul_mbps = float("%.1f" % ul_mbps)
+  if verbose: print("Highest Upload Speed (kB/s):", ul_highestspeedkBps,  "aka Mbps ", ul_mbps)
+
+  return dict(dl_Mbps=dl_mbps,ul_Mbps=ul_mbps, netflix_meta_client = parsedjson['client'])
+
+def monitor_download(verbose=False, urls=[], maxtime=15):
+  amount = len(urls)
+  threads = [None] * amount
+  results = [0] * amount
+  stop_threads = False
+  # Now start the download threads
   for i in range(len(threads)):
     #print "Thread: i is", i
-    threads[i] = Thread(target=gethtmlresult, args=(urls[i], results, i))
+    threads[i] = Thread(target=gethtmlresult_dl, args=(urls[i], results, i, lambda : stop_threads))
     threads[i].daemon=True
     threads[i].start()
 
   # Monitor the amount of bytes (and speed) of the threads
-  time.sleep(1)
+  time.sleep(3)
   sleepseconds = 3  # 3 seconds sleep
-  lasttotal = 0
   highestspeedkBps = 0
-  maxdownload = 60 #MB
   nrloops = int(maxtime / sleepseconds)
   for loop in range(nrloops):
     total = 0
     for i in range(len(threads)):
-      #print i, results[i]
       total += results[i]
-    delta = total-lasttotal
-    speedkBps = (delta/sleepseconds)/(1024)
+      results[i] = 0
+    speedkBps = (total/sleepseconds)/(1024)
     if verbose:
-      print("Loop", loop, "Total MB", total/(1024*1024), "Delta MB", delta/(1024*1024), "Speed kB/s:", speedkBps, "aka Mbps %.1f" % (application_bytes_to_networkbits(speedkBps)/1024))
-    lasttotal = total
+      print("Loop", loop, "Total MB", total/(1024*1024), "Speed kB/s:", speedkBps, "aka Mbps %.1f" % (application_bytes_to_networkbits(speedkBps)/1024))
     if speedkBps > highestspeedkBps:
       highestspeedkBps = speedkBps
     time.sleep(sleepseconds)
+  stop_threads = True
 
+  return highestspeedkBps
 
-  Mbps = (application_bytes_to_networkbits(highestspeedkBps)/1024)
-  Mbps = float("%.1f" % Mbps)
-  if verbose: print("Highest Speed (kB/s):", highestspeedkBps,  "aka Mbps ", Mbps)
+def monitor_upload(verbose=False, urls=[], maxtime=15):
+  amount = len(urls)
+  threads = [None] * amount
+  results = [0] * amount
+  stop_threads = False
+  # Now start the download threads
+  for i in range(len(threads)):
+    #print "Thread: i is", i
+    threads[i] = Thread(target=gethtmlresult_ul, args=(urls[i], results, i, lambda : stop_threads))
+    threads[i].daemon=True
+    threads[i].start()
 
-  return Mbps
+  # Monitor the amount of bytes (and speed) of the threads
+  time.sleep(3)
+  sleepseconds = 3  # 3 seconds sleep
+  highestspeedkBps = 0
+  nrloops = int(maxtime / sleepseconds)
+  for loop in range(nrloops):
+    total = 0
+    for i in range(len(threads)):
+      total += results[i]
+      results[i] = 0
+    speedkBps = (total/sleepseconds)/(1024)
+    if verbose:
+      print("Loop", loop, "Total MB", total/(1024*1024), "Speed kB/s:", speedkBps, "aka Mbps %.1f" % (application_bytes_to_networkbits(speedkBps)/1024))
+    if speedkBps > highestspeedkBps:
+      highestspeedkBps = speedkBps
+    time.sleep(sleepseconds)
+  stop_threads = True
 
+  return highestspeedkBps
 
 ######## MAIN #################
 
