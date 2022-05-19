@@ -104,10 +104,10 @@ def fast_com(verbose=False, maxtime=15, forceipv4=False, forceipv6=False):
     ipv6 = findipv6('api.fast.com')
     baseurl = 'http://[' + ipv6 + ']/'
 
-  url = baseurl + 'netflix/speedtest?https=true&token=' + token + '&urlCount=3' # Not more than 3 possible
+  url = baseurl + 'netflix/speedtest/v2?https=true&token=' + token + '&urlCount=5' # Not more than 3 possible
   if verbose: print("API url is", url)
   try:
-    urlresult = urllib.request.urlopen(url, None, 2)  # 2 second time-out
+    urlresult = urllib.request.urlopen(url, None)
   except:
     # not good
     if verbose: print("No connection possible") # probably IPv6, or just no network
